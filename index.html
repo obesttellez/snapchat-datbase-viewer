@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snapchat DB Viewer — Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0c;
+  --surface: #111115;
+  --surface2: #1a1a20;
+  --border: #252530;
+  --border2: #32323e;
+  --y: #FFFC00;
+  --yd: rgba(255,252,0,0.10);
+  --yg: rgba(255,252,0,0.05);
+  --text: #e8e8f0;
+  --t2: #8888a0;
+  --t3: #55556a;
+  --green: #4ade80;
+  --red: #f87171;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+}
+
+/* background grid */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 40px 40px;
+  opacity: 0.4;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.wrap {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* header */
+.header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+}
+
+.logo-mark {
+  width: 52px; height: 52px;
+  background: var(--y);
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  position: relative;
+  flex-shrink: 0;
+  box-shadow: 0 0 40px rgba(255,252,0,0.25);
+}
+.logo-mark::after {
+  content: '';
+  position: absolute;
+  bottom: -7px; left: 50%; transform: translateX(-50%);
+  width: 20px; height: 10px;
+  background: var(--y);
+  clip-path: polygon(0 0, 50% 100%, 100% 0);
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.sub {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  color: var(--t3);
+  line-height: 1.6;
+  max-width: 380px;
+}
+
+.privacy-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--t3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 5px 12px;
+}
+
+.privacy-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+  box-shadow: 0 0 6px var(--green);
+}
+
+/* drop zone */
+.dropzone {
+  background: var(--surface);
+  border: 2px dashed var(--border2);
+  border-radius: 16px;
+  padding: 48px 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.dropzone:hover, .dropzone.drag-over {
+  border-color: var(--y);
+  background: var(--yd);
+}
+
+.dropzone.drag-over::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--yg);
+  pointer-events: none;
+}
+
+.drop-icon {
+  font-size: 36px;
+  line-height: 1;
+}
+
+.drop-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.drop-sub {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--t3);
+  text-align: center;
+}
+
+.file-btn {
+  background: var(--y);
+  color: #111;
+  border: none;
+  border-radius: 8px;
+  padding: 9px 20px;
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+  letter-spacing: 0.03em;
+  margin-top: 4px;
+}
+.file-btn:hover { opacity: 0.85; transform: translateY(-1px); }
+.file-btn:active { transform: translateY(0); }
+
+#fileInput { display: none; }
+
+/* progress card */
+.progress-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  display: none;
+  flex-direction: column;
+  gap: 16px;
+}
+.progress-card.visible { display: flex; }
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.progress-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  color: var(--t2);
+}
+
+.progress-pct {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+  color: var(--y);
+}
+
+.progress-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--y);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 8px rgba(255,252,0,0.4);
+}
+
+.log-area {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--t3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.log-line { display: flex; gap: 8px; }
+.log-line .ts { color: var(--t3); flex-shrink: 0; }
+.log-line .msg { color: var(--t2); }
+.log-line.ok .msg { color: var(--green); }
+.log-line.err .msg { color: var(--red); }
+
+/* result card */
+.result-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  display: none;
+  flex-direction: column;
+  gap: 16px;
+}
+.result-card.visible { display: flex; }
+
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.result-icon {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: rgba(74,222,128,0.12);
+  border: 1px solid rgba(74,222,128,0.25);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.result-title { font-size: 15px; font-weight: 600; }
+.result-sub { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--t3); margin-top: 2px; }
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.stat-cell {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.stat-cell-val {
+  font-family: 'DM Mono', monospace;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--y);
+  line-height: 1;
+}
+
+.stat-cell-label {
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  color: var(--t3);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.download-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--y);
+  color: #111;
+  border: none;
+  border-radius: 10px;
+  padding: 13px 20px;
+  font-family: 'DM Mono', monospace;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  width: 100%;
+  transition: opacity 0.15s, transform 0.1s;
+  letter-spacing: 0.03em;
+}
+.download-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+.download-btn:active { transform: translateY(0); }
+
+.reset-btn {
+  background: transparent;
+  color: var(--t3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+  width: 100%;
+  text-align: center;
+}
+.reset-btn:hover { border-color: var(--border2); color: var(--t2); }
+
+/* footer */
+.footer {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--t3);
+  text-align: center;
+  line-height: 1.8;
+}
+
+.footer a { color: var(--t2); text-decoration: none; }
+.footer a:hover { color: var(--y); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="header">
+    <div class="logo-mark"></div>
+    <h1>Snapchat Viewer</h1>
+    <p class="sub">Drop your <code style="color:var(--y);background:var(--yd);padding:1px 5px;border-radius:4px;font-size:11px">message_logger.db</code> file and get a fully self-contained HTML file with all your Snapchat messages.</p>
+    <div class="privacy-note">
+      <div class="privacy-dot"></div>
+      100% client-side — your data never leaves your device
+    </div>
+  </div>
+
+  <!-- Drop zone -->
+  <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
+    <div class="drop-icon">🗄️</div>
+    <div class="drop-title">Drop your database file here</div>
+    <div class="drop-sub">message_logger.db · SQLite format<br>from the Snapchat Message Logger app</div>
+    <button class="file-btn" onclick="event.stopPropagation(); document.getElementById('fileInput').click()">Browse files</button>
+    <input type="file" id="fileInput" accept=".db,.sqlite,.sqlite3" onchange="handleFile(this.files[0])">
+  </div>
+
+  <!-- Progress -->
+  <div class="progress-card" id="progressCard">
+    <div class="progress-header">
+      <span class="progress-label" id="progressLabel">Reading database…</span>
+      <span class="progress-pct" id="progressPct">0%</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="log-area" id="logArea"></div>
+  </div>
+
+  <!-- Result -->
+  <div class="result-card" id="resultCard">
+    <div class="result-header">
+      <div class="result-icon">✓</div>
+      <div>
+        <div class="result-title">Viewer ready</div>
+        <div class="result-sub" id="resultSub">—</div>
+      </div>
+    </div>
+    <div class="stats-grid" id="statsGrid"></div>
+    <button class="download-btn" id="downloadBtn">⬇ Download snapchat_viewer.html</button>
+    <button class="reset-btn" onclick="reset()">Process another file</button>
+  </div>
+
+  <div class="footer">
+    All processing happens in your browser via WebAssembly (sql.js).<br>
+    No server. No tracking. No data uploaded.<br>
+    <a href="https://github.com/sql-js/sql.js" target="_blank">sql.js</a> · Compatible with Snapchat Message Logger databases
+  </div>
+</div>
+
+<!-- sql.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"></script>
+<script src="generator.js"></script>
+
+</body>
+</html>
