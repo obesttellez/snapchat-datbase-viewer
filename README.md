@@ -4,7 +4,7 @@ A client-side tool that converts your `message_logger.db` into a self-contained 
 
 ## Usage
 
-1. Visit the GitHub Pages site
+1. Visit the GitHub Pages site - https://obesttellez.github.io/snapchat-datbase-viewer/
 2. Drop your `message_logger.db` file onto the page
 3. Wait a few seconds while it processes
 4. Download the generated `snapchat_viewer.html`
