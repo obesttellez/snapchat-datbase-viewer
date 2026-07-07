@@ -4,7 +4,7 @@
  * decodes all conversations and messages (including replies), then generates a
  * self-contained snapchat_viewer.html for download.
  *
- * Supports three view themes: Custom · Web · App
+ * Single view style: Web
  */
 
 // ─── Drag & drop ─────────────────────────────────────────────────────────────
@@ -79,10 +79,17 @@ function reset() {
 // ─── Protobuf varint decoder ──────────────────────────────────────────────────
 
 function readVarint(bytes, pos) {
+  // Use multiplication instead of `|=`/`<<` beyond bit 28: JS bitwise ops are
+  // 32-bit signed, so shifting further silently wraps/corrupts large values
+  // (e.g. big mMessageId fields), which broke reply resolution on some rows.
   let result = 0, shift = 0;
   while (pos < bytes.length) {
     const b = bytes[pos++];
-    result |= (b & 0x7F) << shift;
+    if (shift < 28) {
+      result |= (b & 0x7F) << shift;
+    } else {
+      result += (b & 0x7F) * Math.pow(2, shift);
+    }
     if (!(b & 0x80)) break;
     shift += 7;
   }
@@ -134,8 +141,10 @@ function extractText(mContentArray) {
   return '';
 }
 
-/** Convert Snapchat's signed-byte UUID array to a standard UUID string */
+/** Convert Snapchat's signed-byte UUID array to a standard UUID string.
+ *  Returns null for malformed/truncated input rather than a garbage UUID. */
 function bytesToUUID(mIdArray) {
+  if (!mIdArray || mIdArray.length !== 16) return null;
   const bs = new Uint8Array(mIdArray.map(b => b & 0xFF));
   const h = Array.from(bs).map(b => b.toString(16).padStart(2, '0')).join('');
   return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
@@ -215,15 +224,39 @@ async function handleFile(file) {
     'SELECT conversation_id, username, send_timestamp, message_data FROM messages ORDER BY send_timestamp ASC'
   );
 
-  // ── Pass 1: build lookup index (conv_id, seq_id) → {u, x, k} for reply resolution
-  const lookup = new Map();
   const rawRows = msgResult.length ? msgResult[0].values : [];
   const total = rawRows.length;
 
-  for (const row of rawRows) {
-    const [cid, username, ts, rawData] = row;
+  // ── Pass 0: parse each row's message_data JSON exactly once and reuse it in
+  // both later passes (previously parsed twice per row, which doubled the
+  // JSON.parse cost across the whole log). Failures are counted, not silent.
+  const parsedRows = new Array(total);
+  let parseErrors = 0;
+  for (let idx = 0; idx < total; idx++) {
+    const rawData = rawRows[idx][3];
     try {
-      const parsed = JSON.parse(typeof rawData === 'string' ? rawData : new TextDecoder().decode(rawData));
+      parsedRows[idx] = JSON.parse(typeof rawData === 'string' ? rawData : new TextDecoder().decode(rawData));
+    } catch (e) {
+      parsedRows[idx] = null;
+      parseErrors++;
+    }
+  }
+  log(
+    `Parsed ${(total - parseErrors).toLocaleString()} / ${total.toLocaleString()} rows` +
+    (parseErrors ? `, ${parseErrors.toLocaleString()} failed to parse` : ''),
+    parseErrors ? 'err' : 'ok'
+  );
+  setProgress(38, 'Building reply index…');
+  await new Promise(r => setTimeout(r, 0));
+
+  // ── Pass 1: build lookup index (conv_id, seq_id) → {u, x, k} for reply resolution
+  const lookup = new Map();
+
+  for (let idx = 0; idx < total; idx++) {
+    const parsed = parsedRows[idx];
+    if (!parsed) continue;
+    const [cid, username] = rawRows[idx];
+    try {
       const seqId = parsed.mDescriptor?.mMessageId;
       if (seqId == null) continue;
       const content = parsed.mMessageContent || {};
@@ -241,12 +274,14 @@ async function handleFile(file) {
   const msgByConvo = {};
   let processed = 0, textExtracted = 0, replyCount = 0;
 
-  for (const row of rawRows) {
-    const [cid, username, ts, rawData] = row;
+  for (let idx = 0; idx < total; idx++) {
+    const row = rawRows[idx];
+    const [cid, username, ts] = row;
+    const parsed = parsedRows[idx];
     let ctype = 'UNKNOWN', text = '', replyInfo = null;
 
     try {
-      const parsed = JSON.parse(typeof rawData === 'string' ? rawData : new TextDecoder().decode(rawData));
+      if (!parsed) throw new Error('unparsed row');
       const content = parsed.mMessageContent || {};
       ctype = content.mContentType || 'UNKNOWN';
 
@@ -334,6 +369,7 @@ async function handleFile(file) {
   setProgress(100, 'Done!');
   await new Promise(r => setTimeout(r, 300));
 
+  db.close(); // free the WASM-backed SQLite memory now that we're done reading it
   showResult(stats, new Blob([html], { type: 'text/html;charset=utf-8' }), file.name);
 }
 
@@ -350,9 +386,7 @@ function buildViewerHTML(owner, convos, stats) {
   })();
 
   const CSS = `
-:root{--bg:#0a0a0c;--surface:#111115;--surface2:#1a1a20;--border:#252530;--border2:#32323e;--y:#FFFC00;--yd:rgba(255,252,0,0.12);--yg:rgba(255,252,0,0.05);--text:#e8e8f0;--t2:#8888a0;--t3:#55556a;--snap:#aaa8ff;--stick:#ff9f78;--media:#78d9ff;}
-body.theme-web{--bg:#0f0f0f;--surface:#1a1a1a;--surface2:#222;--border:#2a2a2a;--border2:#333;--text:#dedede;--t2:#aaa;--t3:#666;}
-body.theme-app{--bg:#121212;--surface:#1e1e1e;--surface2:#252525;--border:#2a2a2a;--border2:#333;--text:#fff;--t2:#aaa;--t3:#666;}
+:root{--bg:#0f0f0f;--surface:#1a1a1a;--surface2:#222;--border:#2a2a2a;--border2:#333;--y:#FFFC00;--yd:rgba(255,252,0,0.12);--yg:rgba(255,252,0,0.05);--text:#dedede;--t2:#aaa;--t3:#666;--snap:#aaa8ff;--stick:#ff9f78;--media:#78d9ff;}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column;transition:background .2s}
 .topbar{display:flex;align-items:center;gap:12px;padding:0 16px;height:52px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
@@ -360,10 +394,6 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);hei
 .ghost{width:24px;height:24px;background:var(--y);border-radius:50% 50% 50% 50%/60% 60% 40% 40%;position:relative;flex-shrink:0}
 .ghost::after{content:'';position:absolute;bottom:-3px;left:50%;transform:translateX(-50%);width:9px;height:5px;background:var(--y);clip-path:polygon(0 0,50% 100%,100% 0)}
 .badge{font-family:'DM Mono',monospace;font-size:10px;color:var(--y);background:var(--yd);border:1px solid rgba(255,252,0,.2);padding:2px 7px;border-radius:20px;letter-spacing:.04em;flex-shrink:0}
-.theme-sw{display:flex;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:3px;flex-shrink:0}
-.tb{font-family:'DM Mono',monospace;font-size:10px;padding:3px 9px;border-radius:5px;border:none;background:transparent;color:var(--t3);cursor:pointer;transition:all .15s;letter-spacing:.03em}
-.tb.on{background:var(--y);color:#111;font-weight:600}
-.tb:not(.on):hover{color:var(--t2)}
 .sw{position:relative;width:160px}
 .sw input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:11px;padding:5px 9px 5px 24px;outline:none;transition:border-color .15s}
 .sw input::placeholder{color:var(--t3)}.sw input:focus{border-color:var(--border2)}
@@ -411,69 +441,32 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);hei
 .mbf{height:100%;background:var(--y);border-radius:2px;transition:width .5s ease}
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
 
-/* ── THEME: CUSTOM (default) ── */
-.mr{display:flex;gap:7px;align-items:flex-end;padding:1px 0}.mr.own{flex-direction:row-reverse}
-.mav{width:20px;height:20px;border-radius:50%;background:var(--surface2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:7px;font-family:'DM Mono',monospace;color:var(--t3);flex-shrink:0;align-self:flex-end}
-.mr.own .mav{background:var(--y);color:#000;border-color:transparent}
-.mc{display:flex;flex-direction:column;gap:1px;max-width:68%}.mr.own .mc{align-items:flex-end}
-.msender{font-family:'DM Mono',monospace;font-size:8px;color:var(--t3);margin-bottom:1px;padding:0 3px}
-.bub{padding:6px 10px;border-radius:14px;font-size:13px;line-height:1.45;word-break:break-word}
-.mr:not(.own) .bub{background:var(--surface2);color:var(--text);border-bottom-left-radius:3px}
-.mr.own .bub{background:var(--y);color:#111;border-bottom-right-radius:3px;font-weight:500}
-.bub.snap{background:rgba(170,168,255,.1);border:1px solid rgba(170,168,255,.2);color:var(--snap);font-family:'DM Mono',monospace;font-size:11px;font-style:italic}
-.mr.own .bub.snap{background:rgba(170,168,255,.2);border:1px solid rgba(170,168,255,.3)}
-.bub.stick{background:rgba(255,159,120,.08);border:1px solid rgba(255,159,120,.2);color:var(--stick);font-family:'DM Mono',monospace;font-size:11px}
-.bub.med{background:rgba(120,217,255,.08);border:1px solid rgba(120,217,255,.2);color:var(--media);font-family:'DM Mono',monospace;font-size:11px}
-.bub.stat{background:transparent;color:var(--t3);font-family:'DM Mono',monospace;font-size:10px;font-style:italic;padding:3px 7px}
-.mtime{font-family:'DM Mono',monospace;font-size:8px;color:var(--t3);padding:0 3px;margin-top:1px}
-
-/* ── THEME: WEB ── */
-body.theme-web .mr{flex-direction:column;align-items:flex-start;gap:2px;padding:3px 0}
-body.theme-web .mr.own{align-items:flex-start}
-body.theme-web .mav{display:none}
-body.theme-web .mc,.body.theme-web .mr.own .mc{max-width:82%;align-items:flex-start}
-body.theme-web .msender{font-size:11px;font-weight:700;font-family:'DM Sans',sans-serif;padding:0;margin-bottom:3px;color:var(--send-col,#aaa);letter-spacing:.01em}
-body.theme-web .bub{border-radius:0;border:none;border-left:3px solid var(--send-col,#555);padding:7px 11px;background:rgba(255,255,255,0.04);color:var(--text);font-size:13px;font-weight:400}
-body.theme-web .mr.own .bub{background:rgba(255,255,255,0.04);color:var(--text);font-weight:400}
-body.theme-web .bub.snap,body.theme-web .bub.stick,body.theme-web .bub.med{background:rgba(255,255,255,0.04);border-left:3px solid var(--send-col,#555);color:var(--t2);font-style:normal;border-top:none;border-right:none;border-bottom:none}
-body.theme-web .bub.stat{background:transparent;color:var(--t3);border:none;padding:3px 0;font-style:italic}
-body.theme-web .mtime{padding:0;font-size:9px;color:var(--t3);margin-top:2px}
-
-/* ── THEME: APP ── */
-body.theme-app .mr{flex-direction:column;align-items:flex-start;gap:1px;padding:2px 0}
-body.theme-app .mr.own{align-items:flex-end}
-body.theme-app .mav{display:none}
-body.theme-app .mc{max-width:78%;align-items:flex-start}
-body.theme-app .mr.own .mc{align-items:flex-end}
-body.theme-app .msender{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;font-family:'DM Sans',sans-serif;padding:0;margin-bottom:2px;color:var(--send-col,#aaa)}
-body.theme-app .bub{border-radius:18px;border-bottom-left-radius:4px;padding:7px 14px;background:rgba(255,255,255,0.08);color:var(--text);font-size:14px;border:none}
-body.theme-app .mr.own .bub{border-radius:18px;border-bottom-right-radius:4px;border-bottom-left-radius:18px;background:rgba(242,60,87,0.15);color:#fff;font-weight:400}
-body.theme-app .bub.snap,body.theme-app .bub.stick,body.theme-app .bub.med{background:rgba(255,255,255,0.06);color:var(--t2);border:none;font-style:normal;border-radius:18px}
-body.theme-app .bub.stat{background:transparent;color:var(--t3);border:none;font-style:italic;padding:2px 6px;font-size:10px;border-radius:0}
-body.theme-app .mtime{padding:0;font-size:9px;color:var(--t3)}
+/* ── MESSAGE ROWS (Web style — the only view style) ── */
+.mr{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:3px 0}
+.mav{display:none}
+.mc{display:flex;flex-direction:column;gap:1px;max-width:82%;align-items:flex-start}
+.msender{font-size:11px;font-weight:700;font-family:'DM Sans',sans-serif;padding:0;margin-bottom:3px;color:var(--send-col,#aaa);letter-spacing:.01em}
+.bub{border-radius:0;border:none;border-left:3px solid var(--send-col,#555);padding:7px 11px;background:rgba(255,255,255,0.04);color:var(--text);font-size:13px;font-weight:400;line-height:1.45;word-break:break-word}
+.bub.snap,.bub.stick,.bub.med{background:rgba(255,255,255,0.04);border-left:3px solid var(--send-col,#555);color:var(--t2);font-family:'DM Mono',monospace;font-size:11px;font-style:normal;border-top:none;border-right:none;border-bottom:none}
+.bub.stat{background:transparent;color:var(--t3);font-family:'DM Mono',monospace;font-size:10px;font-style:italic;padding:3px 0;border:none}
+.mtime{padding:0;font-size:9px;color:var(--t3);margin-top:2px}
 
 /* ── REPLY PREVIEW ── */
-.reply-preview{display:flex;flex-direction:column;gap:1px;border-left:3px solid rgba(255,255,255,0.2);padding:3px 8px 3px 7px;border-radius:4px;background:rgba(0,0,0,0.18);margin-bottom:3px;font-size:11px;max-width:100%}
+.reply-preview{display:flex;flex-direction:column;gap:1px;background:rgba(255,255,255,0.03);border-left:3px solid var(--rp-col,var(--t3));border-radius:0;padding:4px 9px;margin-bottom:5px;font-size:11px;max-width:100%}
 .reply-sender{font-family:'DM Mono',monospace;font-size:9px;font-weight:600;color:var(--rp-col,var(--t2));letter-spacing:.03em;margin-bottom:1px}
 .reply-text{color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;font-size:11px;line-height:1.3}
-.mr.own .reply-preview{border-left-color:rgba(0,0,0,0.25);background:rgba(0,0,0,0.12)}
-body.theme-web .reply-preview{background:rgba(255,255,255,0.03);border-left:3px solid var(--rp-col,var(--t3));border-radius:0;padding:4px 9px;margin-bottom:5px}
-body.theme-app .reply-preview{background:rgba(255,255,255,0.05);border-left:3px solid var(--rp-col,var(--t3));border-radius:10px 10px 0 0;padding:5px 11px;margin-bottom:0;border-bottom:1px solid rgba(255,255,255,0.07)}
-body.theme-app .mr.own .reply-preview{background:rgba(242,60,87,0.08)}
 `;
 
   const JS_LOGIC = `
 const _cc={};let _ci=0;
 function uCol(u){if(!_cc[u]){_cc[u]=PALETTE[_ci%PALETTE.length];_ci++;}return _cc[u];}
-let ai=null,fm='all',cm=[],vsItems=[],vsFirst=-1,vsLast=-1,vsRAF=null,theme='custom';
+let ai=null,fm='all',cm=[],vsItems=[],vsFirst=-1,vsLast=-1,vsRAF=null;
 const fmD=t=>new Date(t).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
 const fmT=t=>new Date(t).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
 const fmDS=t=>new Date(t).toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
 const ini=n=>n?n.slice(0,2).toUpperCase():'??';
 const esc=s=>s?(s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'):'';
 const ROW_H=44,OVERSCAN=14;
-
-function setTheme(t,btn){theme=t;document.body.className='theme-'+t;document.querySelectorAll('.tb').forEach(b=>b.classList.remove('on'));btn.classList.add('on');if(ai!==null){vsFirst=-1;vsLast=-1;vsRender(false);}}
 
 function buildRL(msgs){const list=[];let ld=null,lu=null;for(const m of msgs){const ds=new Date(m.t).toDateString();if(ds!==ld){list.push({type:'sep',label:fmDS(m.t)});ld=ds;lu=null;}const isStat=m.k.startsWith('STATUS_');const own=m.u===OWN;const show=m.u!==lu&&!isStat;if(!isStat)lu=m.u;list.push({type:'msg',m,own,show,isStat});}return list;}
 
@@ -498,9 +491,9 @@ function rowHTML(item){
   const{m,own,show,isStat}=item;
   if(isStat)return \`<div class="mr"><div style="width:100%;text-align:center"><span class="bub stat">\${bText(m)}</span><div class="mtime" style="text-align:center">\${fmT(m.t)}</div></div></div>\`;
   const col=uCol(m.u);
-  const cs=(theme==='web'||theme==='app')?\`--send-col:\${col};\`:'';
+  const cs=\`--send-col:\${col};\`;
   let sh='';
-  if(show){if(theme==='web'||theme==='app'){sh=\`<div class="msender" style="\${cs}">\${own?'Me':esc(m.u)}</div>\`;}else if(!own){sh=\`<div class="msender">\${esc(m.u)}</div>\`;}}
+  if(show){sh=\`<div class="msender" style="\${cs}">\${own?'Me':esc(m.u)}</div>\`;}
   const rp=m.r?replyHTML(m.r,col):'';
   return \`<div class="mr\${own?' own':''}" style="\${cs}"><div class="mav">\${own?'◎':ini(m.u)}</div><div class="mc">\${sh}\${rp}<div class="bub \${bClass(m.k)}" style="\${cs}">\${bText(m)}</div><div class="mtime">\${fmT(m.t)}</div></div></div>\`;
 }
@@ -536,11 +529,6 @@ rList('all');if(D.length>0)openC(0);
 <div class="topbar">
   <div class="logo"><div class="ghost"></div>Snapchat Logs</div>
   <span class="badge">${escHtml(owner)}</span>
-  <div class="theme-sw">
-    <button class="tb on" onclick="setTheme('custom',this)">Custom</button>
-    <button class="tb" onclick="setTheme('web',this)">Web</button>
-    <button class="tb" onclick="setTheme('app',this)">App</button>
-  </div>
   <div class="sw"><span class="si">⌕</span><input type="text" id="qs" placeholder="Search messages…" oninput="search(this.value)"></div>
   <div class="tbstats">
     <span><span class="sv">${stats.convos}</span> convos</span>
